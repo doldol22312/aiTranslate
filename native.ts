@@ -388,11 +388,22 @@ async function makeHttpRequest({
     timeoutMs,
     url
 }: HttpRequestOptions): Promise<HttpResult> {
+    if (proxyUrl) {
+        return await makeProxiedHttpRequest({
+            body,
+            headers,
+            method,
+            proxyUrl,
+            timeoutMs,
+            url
+        });
+    }
+
     const requestFn = url.protocol === "https:" ? httpsRequest : httpRequest;
 
     return await new Promise<HttpResult>((resolve, reject) => {
         const requestOptions: Record<string, any> = {
-            agent: proxyUrl ? false : undefined,
+            agent: undefined,
             headers,
             host: url.hostname,
             hostname: url.hostname,
@@ -402,14 +413,6 @@ async function makeHttpRequest({
             protocol: url.protocol,
             timeout: timeoutMs
         };
-
-        if (proxyUrl) {
-            requestOptions.createConnection = (_options: unknown, callback: (error: Error | null, stream?: ConnectableSocket) => void) => {
-                void openSocksConnection(url, proxyUrl, timeoutMs)
-                    .then(socket => callback(null, socket))
-                    .catch(error => callback(error instanceof Error ? error : new Error(String(error))));
-            };
-        }
 
         const req = requestFn(requestOptions, res => {
             const chunks: Buffer[] = [];
@@ -430,6 +433,146 @@ async function makeHttpRequest({
         if (body) req.write(body);
         req.end();
     });
+}
+
+async function makeProxiedHttpRequest({
+    body,
+    headers,
+    method,
+    proxyUrl,
+    timeoutMs,
+    url
+}: HttpRequestOptions): Promise<HttpResult> {
+    const socket = await openSocksConnection(url, proxyUrl, timeoutMs);
+    socket.setTimeout(timeoutMs);
+
+    const requestBody = body ?? "";
+    const headerLines = {
+        ...headers,
+        "Host": formatHostHeader(url),
+        "Connection": "close",
+        ...(requestBody && !hasHeader(headers, "content-length")
+            ? { "Content-Length": Buffer.byteLength(requestBody).toString() }
+            : {})
+    };
+
+    const rawRequest = [
+        `${method} ${url.pathname}${url.search} HTTP/1.1`,
+        ...Object.entries(headerLines).map(([key, value]) => `${key}: ${value}`),
+        "",
+        requestBody
+    ].join("\r\n");
+
+    return await new Promise<HttpResult>((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        let settled = false;
+
+        const finish = (handler: () => void) => {
+            if (settled) return;
+            settled = true;
+            handler();
+        };
+
+        socket.once("timeout", () => socket.destroy(new Error(`Request timed out after ${timeoutMs}ms`)));
+        socket.once("error", error => finish(() => reject(error)));
+        socket.on("data", chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        socket.once("end", () => {
+            finish(() => {
+                try {
+                    resolve(parseRawHttpResponse(Buffer.concat(chunks)));
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        });
+        socket.once("close", hadError => {
+            if (hadError) return;
+            if (!chunks.length) return;
+
+            finish(() => {
+                try {
+                    resolve(parseRawHttpResponse(Buffer.concat(chunks)));
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        });
+
+        socket.end(rawRequest);
+    });
+}
+
+function hasHeader(headers: Record<string, string>, target: string) {
+    const normalizedTarget = target.toLowerCase();
+    return Object.keys(headers).some(key => key.toLowerCase() === normalizedTarget);
+}
+
+function formatHostHeader(url: URL) {
+    const defaultPort = url.protocol === "https:" ? "443" : "80";
+    return url.port && url.port !== defaultPort
+        ? `${url.hostname}:${url.port}`
+        : url.hostname;
+}
+
+function parseRawHttpResponse(response: Buffer): HttpResult {
+    const separatorIndex = response.indexOf("\r\n\r\n");
+    if (separatorIndex === -1) {
+        throw new Error("Proxy response did not contain valid HTTP headers");
+    }
+
+    const headerText = response.subarray(0, separatorIndex).toString("utf8");
+    const body = response.subarray(separatorIndex + 4);
+    const [statusLine, ...headerLines] = headerText.split("\r\n");
+    const statusMatch = /^HTTP\/\d+(?:\.\d+)?\s+(\d+)/i.exec(statusLine);
+    if (!statusMatch) {
+        throw new Error(`Invalid HTTP status line from proxy response: ${statusLine}`);
+    }
+
+    const headers = Object.fromEntries(headerLines.map(line => {
+        const separator = line.indexOf(":");
+        return [
+            line.slice(0, separator).trim().toLowerCase(),
+            line.slice(separator + 1).trim()
+        ];
+    }));
+
+    const decodedBody = headers["transfer-encoding"]?.toLowerCase().includes("chunked")
+        ? decodeChunkedBody(body)
+        : body;
+
+    return {
+        data: decodedBody.toString("utf8"),
+        status: Number(statusMatch[1])
+    };
+}
+
+function decodeChunkedBody(buffer: Buffer) {
+    let offset = 0;
+    const chunks: Buffer[] = [];
+
+    while (offset < buffer.length) {
+        const lineEnd = buffer.indexOf("\r\n", offset);
+        if (lineEnd === -1) throw new Error("Invalid chunked response from proxy");
+
+        const chunkSizeHex = buffer.subarray(offset, lineEnd).toString("utf8").split(";", 1)[0].trim();
+        const chunkSize = Number.parseInt(chunkSizeHex, 16);
+        if (Number.isNaN(chunkSize)) {
+            throw new Error(`Invalid chunk size in proxy response: ${chunkSizeHex}`);
+        }
+
+        offset = lineEnd + 2;
+        if (chunkSize === 0) {
+            return Buffer.concat(chunks);
+        }
+
+        const chunkEnd = offset + chunkSize;
+        if (chunkEnd > buffer.length) throw new Error("Chunked response ended unexpectedly");
+
+        chunks.push(buffer.subarray(offset, chunkEnd));
+        offset = chunkEnd + 2;
+    }
+
+    throw new Error("Chunked response terminated unexpectedly");
 }
 
 async function openSocksConnection(url: URL, proxyUrl: string, timeoutMs: number): Promise<ConnectableSocket> {
