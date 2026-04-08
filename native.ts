@@ -52,27 +52,45 @@ class SocketBuffer {
     private error: Error | null = null;
     private pendingResolvers = new Set<() => void>();
     private readableEnded = false;
+    private socket: Socket;
+
+    private onData = (chunk: Buffer) => {
+        this.buffer = Buffer.concat([this.buffer, chunk]);
+        this.flush();
+    };
+
+    private onClose = () => {
+        this.readableEnded = true;
+        this.flush();
+    };
+
+    private onEnd = () => {
+        this.readableEnded = true;
+        this.flush();
+    };
+
+    private onError = (error: Error) => {
+        this.error = error;
+        this.flush();
+    };
 
     constructor(socket: Socket) {
-        socket.on("data", chunk => {
-            this.buffer = Buffer.concat([this.buffer, chunk]);
-            this.flush();
-        });
+        this.socket = socket;
+        socket.on("data", this.onData);
+        socket.once("close", this.onClose);
+        socket.once("end", this.onEnd);
+        socket.once("error", this.onError);
+    }
 
-        socket.once("close", () => {
-            this.readableEnded = true;
-            this.flush();
-        });
+    cleanup() {
+        this.socket.off("data", this.onData);
+        this.socket.off("close", this.onClose);
+        this.socket.off("end", this.onEnd);
+        this.socket.off("error", this.onError);
 
-        socket.once("end", () => {
-            this.readableEnded = true;
-            this.flush();
-        });
-
-        socket.once("error", error => {
-            this.error = error;
-            this.flush();
-        });
+        if (this.buffer.length > 0) {
+            this.socket.unshift(this.buffer);
+        }
     }
 
     async read(length: number) {
@@ -622,35 +640,39 @@ function parseProxyUrl(proxyUrl: string): SocksProxyConfig {
 
 async function negotiateSocksConnection(socket: Socket, targetUrl: URL, proxy: SocksProxyConfig) {
     const reader = new SocketBuffer(socket);
-    const methods = proxy.username || proxy.password ? [0x00, 0x02] : [0x00];
+    try {
+        const methods = proxy.username || proxy.password ? [0x00, 0x02] : [0x00];
 
-    socket.write(Buffer.from([0x05, methods.length, ...methods]));
+        socket.write(Buffer.from([0x05, methods.length, ...methods]));
 
-    const hello = await reader.read(2);
-    if (hello[0] !== 0x05) throw new Error("SOCKS5 proxy returned an invalid version");
-    if (hello[1] === 0xff) throw new Error("SOCKS5 proxy rejected all authentication methods");
+        const hello = await reader.read(2);
+        if (hello[0] !== 0x05) throw new Error("SOCKS5 proxy returned an invalid version");
+        if (hello[1] === 0xff) throw new Error("SOCKS5 proxy rejected all authentication methods");
 
-    if (hello[1] === 0x02) {
-        await authenticateWithPassword(socket, reader, proxy);
-    } else if (hello[1] !== 0x00) {
-        throw new Error(`SOCKS5 proxy selected unsupported auth method ${hello[1]}`);
+        if (hello[1] === 0x02) {
+            await authenticateWithPassword(socket, reader, proxy);
+        } else if (hello[1] !== 0x00) {
+            throw new Error(`SOCKS5 proxy selected unsupported auth method ${hello[1]}`);
+        }
+
+        const port = Number(targetUrl.port || (targetUrl.protocol === "https:" ? 443 : 80));
+        const address = encodeSocksAddress(targetUrl.hostname);
+        const portBytes = Buffer.from([port >> 8, port & 0xff]);
+
+        socket.write(Buffer.concat([
+            Buffer.from([0x05, 0x01, 0x00]),
+            address,
+            portBytes
+        ]));
+
+        const responseHead = await reader.read(4);
+        if (responseHead[0] !== 0x05) throw new Error("SOCKS5 proxy connect response had an invalid version");
+        if (responseHead[1] !== 0x00) throw new Error(getSocksReplyError(responseHead[1]));
+
+        await discardBoundAddress(reader, responseHead[3]);
+    } finally {
+        reader.cleanup();
     }
-
-    const port = Number(targetUrl.port || (targetUrl.protocol === "https:" ? 443 : 80));
-    const address = encodeSocksAddress(targetUrl.hostname);
-    const portBytes = Buffer.from([port >> 8, port & 0xff]);
-
-    socket.write(Buffer.concat([
-        Buffer.from([0x05, 0x01, 0x00]),
-        address,
-        portBytes
-    ]));
-
-    const responseHead = await reader.read(4);
-    if (responseHead[0] !== 0x05) throw new Error("SOCKS5 proxy connect response had an invalid version");
-    if (responseHead[1] !== 0x00) throw new Error(getSocksReplyError(responseHead[1]));
-
-    await discardBoundAddress(reader, responseHead[3]);
 }
 
 async function authenticateWithPassword(socket: Socket, reader: SocketBuffer, proxy: SocksProxyConfig) {
