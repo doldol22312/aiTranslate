@@ -58,6 +58,15 @@
     gap: 0.5rem;
 }
 
+.vc-ai-trans-diagnostic {
+    display: grid;
+    gap: 0.25rem;
+    padding: 0.7rem 0.8rem;
+    border: 1px solid var(--background-modifier-accent);
+    border-radius: 10px;
+    background: var(--background-secondary);
+}
+
 .vc-ai-trans-key-result {
     display: grid;
     gap: 0.25rem;

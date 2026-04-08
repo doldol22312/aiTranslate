@@ -57,9 +57,28 @@ export interface NativeKeyCheckResult {
     results: NativeKeyCheckResultEntry[];
 }
 
+export interface NativeProxyDiagnosticRequest {
+    proxyUrl: string;
+    requestTimeoutMs: number;
+}
+
+export interface NativeProxyDiagnosticResult {
+    proxied: boolean;
+    ip?: string;
+    city?: string;
+    region?: string;
+    countryCode?: string;
+    countryName?: string;
+    org?: string;
+    asn?: string;
+    status: number;
+    error?: string;
+}
+
 export const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/";
 export const DEFAULT_MODEL = "gemini-3-flash-preview";
 export const DEFAULT_GEMINI_KEY_CHECK_MODEL = "gemma-3-27b-it";
+export const PROXY_DIAGNOSTIC_URL = "https://ipapi.co/json/";
 
 export function buildTranslationSystemPrompt(sourceLanguage: string, targetLanguage: string) {
     const source = sourceLanguage.trim() || "auto";

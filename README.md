@@ -44,3 +44,4 @@ Examples:
 - Shift-click or right-click the translate icon to toggle auto-translate.
 - Use the message popover button or message context menu to translate received messages.
 - Use the plugin settings page to check configured keys and choose the routing mode.
+- Use `Run Proxy Diagnostic` to see the public IP and country observed through the same native proxy path used by requests.

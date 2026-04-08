@@ -8,7 +8,7 @@ import { PluginNative } from "@utils/types";
 import { Forms, useState } from "@webpack/common";
 
 import { settings } from "./settings";
-import { DEFAULT_GEMINI_KEY_CHECK_MODEL, NativeKeyCheckResultEntry, parseApiKeys } from "./shared";
+import { DEFAULT_GEMINI_KEY_CHECK_MODEL, NativeKeyCheckResultEntry, NativeProxyDiagnosticResult, parseApiKeys } from "./shared";
 import { cl } from "./utils";
 
 const Native = VencordNative.pluginHelpers.AITranslate as PluginNative<typeof import("./native")>;
@@ -32,7 +32,9 @@ export function KeyTools() {
     } = settings.use(["apiKeys", "apiKey", "baseUrl", "keyCheckModel", "keyRouting", "model", "proxyUrl", "requestTimeoutMs"]);
 
     const [isChecking, setIsChecking] = useState(false);
+    const [isDiagnosing, setIsDiagnosing] = useState(false);
     const [results, setResults] = useState<NativeKeyCheckResultEntry[] | null>(null);
+    const [diagnostic, setDiagnostic] = useState<NativeProxyDiagnosticResult | null>(null);
     const [error, setError] = useState<string | null>(null);
 
     const rawKeys = apiKeys || apiKey;
@@ -62,6 +64,25 @@ export function KeyTools() {
         }
     }
 
+    async function runDiagnostic() {
+        setIsDiagnosing(true);
+        setError(null);
+
+        try {
+            const response = await Native.diagnoseProxy({
+                proxyUrl,
+                requestTimeoutMs
+            });
+
+            setDiagnostic(response);
+        } catch (err) {
+            setDiagnostic(null);
+            setError(err instanceof Error ? err.message : String(err));
+        } finally {
+            setIsDiagnosing(false);
+        }
+    }
+
     return (
         <div className={cl("key-tools")}>
             <Forms.FormText>
@@ -72,6 +93,9 @@ export function KeyTools() {
             <Forms.FormText>
                 Key checker uses <code>{effectiveCheckModel}</code> and the configured base URL to verify each key.
             </Forms.FormText>
+            <Forms.FormText>
+                Proxy diagnostic checks the public IP and country through the same native network path used by translations.
+            </Forms.FormText>
 
             <div className={cl("key-tools-actions")}>
                 <Button
@@ -81,11 +105,20 @@ export function KeyTools() {
                     {isChecking ? "Checking..." : "Check Keys"}
                 </Button>
 
-                {results && (
+                <Button
+                    variant="secondary"
+                    onClick={runDiagnostic}
+                    disabled={isDiagnosing}
+                >
+                    {isDiagnosing ? "Diagnosing..." : "Run Proxy Diagnostic"}
+                </Button>
+
+                {(results || diagnostic) && (
                     <Button
                         variant="secondary"
                         onClick={() => {
                             setResults(null);
+                            setDiagnostic(null);
                             setError(null);
                         }}
                     >
@@ -97,6 +130,34 @@ export function KeyTools() {
             {error && (
                 <div className={cl("key-result", "key-result-fail")}>
                     <Forms.FormText>{error}</Forms.FormText>
+                </div>
+            )}
+
+            {diagnostic && (
+                <div className={cl("diagnostic", diagnostic.error ? "key-result-fail" : "key-result-ok")}>
+                    <div className={cl("key-result-header")}>
+                        <span>Proxy Diagnostic</span>
+                        <span>{diagnostic.proxied ? "SOCKS5 enabled" : "Direct connection"}</span>
+                        <span>{diagnostic.status}</span>
+                    </div>
+
+                    {diagnostic.error ? (
+                        <Forms.FormText>{diagnostic.error}</Forms.FormText>
+                    ) : (
+                        <>
+                            <Forms.FormText>
+                                IP: <code>{diagnostic.ip || "unknown"}</code>
+                            </Forms.FormText>
+                            <Forms.FormText>
+                                Location: <code>{formatLocation(diagnostic)}</code>
+                            </Forms.FormText>
+                            {(diagnostic.asn || diagnostic.org) && (
+                                <Forms.FormText>
+                                    Network: <code>{[diagnostic.asn, diagnostic.org].filter(Boolean).join(" · ")}</code>
+                                </Forms.FormText>
+                            )}
+                        </>
+                    )}
                 </div>
             )}
 
@@ -139,4 +200,12 @@ function getEffectiveKeyCheckModel(baseUrl: string, keyCheckModel: string | unde
     } catch { }
 
     return model?.trim() || "";
+}
+
+function formatLocation(result: NativeProxyDiagnosticResult) {
+    return [
+        result.city,
+        result.region,
+        result.countryCode || result.countryName
+    ].filter(Boolean).join(", ") || "unknown";
 }

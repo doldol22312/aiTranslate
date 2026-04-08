@@ -15,9 +15,12 @@ import {
     maskApiKey,
     NativeKeyCheckRequest,
     NativeKeyCheckResult,
+    NativeProxyDiagnosticRequest,
+    NativeProxyDiagnosticResult,
     NativeTranslationRequest,
     NativeTranslationResult,
-    parseApiKeys
+    parseApiKeys,
+    PROXY_DIAGNOSTIC_URL
 } from "./shared";
 
 type ConnectableSocket = Socket | TLSSocket;
@@ -153,6 +156,47 @@ export async function checkKeys(_: IpcMainInvokeEvent, request: NativeKeyCheckRe
     const results = await Promise.all(keys.map((apiKey, index) => checkSingleKey(index, apiKey, request)));
 
     return { results };
+}
+
+export async function diagnoseProxy(_: IpcMainInvokeEvent, request: NativeProxyDiagnosticRequest): Promise<NativeProxyDiagnosticResult> {
+    try {
+        const { status, data } = await makeHttpRequest({
+            headers: {
+                "Accept": "application/json"
+            },
+            method: "GET",
+            proxyUrl: request.proxyUrl.trim(),
+            timeoutMs: request.requestTimeoutMs,
+            url: new URL(PROXY_DIAGNOSTIC_URL)
+        });
+
+        const parsed = safeParseJson(data);
+        if (status < 200 || status >= 300) {
+            return {
+                proxied: Boolean(request.proxyUrl.trim()),
+                status,
+                error: formatApiError(status, data, parsed)
+            };
+        }
+
+        return {
+            proxied: Boolean(request.proxyUrl.trim()),
+            ip: parsed?.ip,
+            city: parsed?.city,
+            region: parsed?.region,
+            countryCode: parsed?.country_code,
+            countryName: parsed?.country_name,
+            org: parsed?.org,
+            asn: parsed?.asn,
+            status
+        };
+    } catch (error) {
+        return {
+            proxied: Boolean(request.proxyUrl.trim()),
+            status: -1,
+            error: error instanceof Error ? error.message : String(error)
+        };
+    }
 }
 
 function validateRequest(request: NativeTranslationRequest) {
