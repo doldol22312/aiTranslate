@@ -14,25 +14,18 @@ Desktop-only Vencord userplugin that translates messages through any OpenAI-comp
 
 ## Install
 
-This repository root is the plugin folder.
-
-Clone or copy it into your Vencord checkout as:
+Copy this folder into your Vencord checkout at:
 
 `src/userplugins/aiTranslate.desktop`
 
 Then rebuild Vencord.
-
-Example:
-
-```bash
-git clone https://github.com/doldol22312/aiTranslate.git src/userplugins/aiTranslate.desktop
-```
 
 ## Gemini Setup
 
 - `Base URL`: `https://generativelanguage.googleapis.com/v1beta/openai/`
 - `API keys`: one Gemini API key per line
 - `Model`: any Gemini OpenAI-compatible model string, for example `gemini-3-flash-preview`
+- `Key Check Model`: leave empty to default to `gemma-3-27b-it` on Google's endpoint
 
 Google's OpenAI-compatibility doc:
 

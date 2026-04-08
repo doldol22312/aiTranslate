@@ -8,7 +8,7 @@ import { PluginNative } from "@utils/types";
 import { Forms, useState } from "@webpack/common";
 
 import { settings } from "./settings";
-import { NativeKeyCheckResultEntry, parseApiKeys } from "./shared";
+import { DEFAULT_GEMINI_KEY_CHECK_MODEL, NativeKeyCheckResultEntry, parseApiKeys } from "./shared";
 import { cl } from "./utils";
 
 const Native = VencordNative.pluginHelpers.AITranslate as PluginNative<typeof import("./native")>;
@@ -24,11 +24,12 @@ export function KeyTools() {
         apiKeys,
         apiKey,
         baseUrl,
+        keyCheckModel,
         keyRouting,
         model,
         proxyUrl,
         requestTimeoutMs
-    } = settings.use(["apiKeys", "apiKey", "baseUrl", "keyRouting", "model", "proxyUrl", "requestTimeoutMs"]);
+    } = settings.use(["apiKeys", "apiKey", "baseUrl", "keyCheckModel", "keyRouting", "model", "proxyUrl", "requestTimeoutMs"]);
 
     const [isChecking, setIsChecking] = useState(false);
     const [results, setResults] = useState<NativeKeyCheckResultEntry[] | null>(null);
@@ -37,6 +38,7 @@ export function KeyTools() {
     const rawKeys = apiKeys || apiKey;
     const configuredKeys = parseApiKeys(rawKeys);
     const routingLabel = routingLabels[keyRouting ?? "ordered"];
+    const effectiveCheckModel = getEffectiveKeyCheckModel(baseUrl, keyCheckModel, model);
 
     async function runCheck() {
         setIsChecking(true);
@@ -46,7 +48,7 @@ export function KeyTools() {
             const response = await Native.checkKeys({
                 apiKeys: rawKeys,
                 baseUrl,
-                model,
+                model: effectiveCheckModel,
                 proxyUrl,
                 requestTimeoutMs
             });
@@ -68,13 +70,13 @@ export function KeyTools() {
                 Routing: <strong>{routingLabel}</strong>
             </Forms.FormText>
             <Forms.FormText>
-                Key checker uses the configured base URL and verifies each key against the current model.
+                Key checker uses <code>{effectiveCheckModel}</code> and the configured base URL to verify each key.
             </Forms.FormText>
 
             <div className={cl("key-tools-actions")}>
                 <Button
                     onClick={runCheck}
-                    disabled={isChecking || configuredKeys.length === 0 || !model.trim() || !baseUrl.trim()}
+                    disabled={isChecking || configuredKeys.length === 0 || !effectiveCheckModel.trim() || !baseUrl.trim()}
                 >
                     {isChecking ? "Checking..." : "Check Keys"}
                 </Button>
@@ -123,4 +125,18 @@ export function KeyTools() {
             )}
         </div>
     );
+}
+
+function getEffectiveKeyCheckModel(baseUrl: string, keyCheckModel: string | undefined, model: string | undefined) {
+    const explicitModel = keyCheckModel?.trim();
+    if (explicitModel) return explicitModel;
+
+    try {
+        const hostname = new URL(baseUrl).hostname;
+        if (hostname === "generativelanguage.googleapis.com") {
+            return DEFAULT_GEMINI_KEY_CHECK_MODEL;
+        }
+    } catch { }
+
+    return model?.trim() || "";
 }

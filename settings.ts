@@ -7,7 +7,7 @@ import { definePluginSettings } from "@api/Settings";
 import { makeRange, OptionType } from "@utils/types";
 
 import { KeyTools } from "./KeyTools";
-import { DEFAULT_BASE_URL, DEFAULT_MODEL, parseApiKeys } from "./shared";
+import { DEFAULT_BASE_URL, DEFAULT_GEMINI_KEY_CHECK_MODEL, DEFAULT_MODEL, parseApiKeys } from "./shared";
 
 const REASONING_EFFORT_OPTIONS = [
     { label: "Default", value: "default", default: true },
@@ -87,6 +87,12 @@ export const settings = definePluginSettings({
         description: "Model name to use for translation. This is free-form on purpose.",
         default: DEFAULT_MODEL,
         placeholder: DEFAULT_MODEL
+    },
+    keyCheckModel: {
+        type: OptionType.STRING,
+        description: "Optional model used only by keychecker. Leave empty to use a provider-aware default.",
+        default: "",
+        placeholder: DEFAULT_GEMINI_KEY_CHECK_MODEL
     },
     keyRouting: {
         type: OptionType.SELECT,

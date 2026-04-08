@@ -59,6 +59,7 @@ export interface NativeKeyCheckResult {
 
 export const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/";
 export const DEFAULT_MODEL = "gemini-3-flash-preview";
+export const DEFAULT_GEMINI_KEY_CHECK_MODEL = "gemma-3-27b-it";
 
 export function buildTranslationSystemPrompt(sourceLanguage: string, targetLanguage: string) {
     const source = sourceLanguage.trim() || "auto";
