@@ -516,7 +516,7 @@ async function makeProxiedHttpRequest({
             });
         });
 
-        socket.end(rawRequest);
+        socket.write(rawRequest);
     });
 }
 
@@ -535,7 +535,9 @@ function formatHostHeader(url: URL) {
 function parseRawHttpResponse(response: Buffer): HttpResult {
     const separatorIndex = response.indexOf("\r\n\r\n");
     if (separatorIndex === -1) {
-        throw new Error("Proxy response did not contain valid HTTP headers");
+        let preview = response.toString("utf8").slice(0, 100);
+        const hexPreview = response.toString("hex").slice(0, 100);
+        throw new Error(`Proxy response did not contain valid HTTP headers. Length: ${response.length}, Hex preview: ${hexPreview}, Text preview: ${preview}`);
     }
 
     const headerText = response.subarray(0, separatorIndex).toString("utf8");
