@@ -25,6 +25,7 @@ import {
 
 type ConnectableSocket = Socket | TLSSocket;
 type HttpMethod = "GET" | "POST";
+const bodylessStatusCodes = new Set([100, 101, 102, 103, 204, 304]);
 
 interface HttpResult {
     data: string;
@@ -485,36 +486,71 @@ async function makeProxiedHttpRequest({
         const chunks: Buffer[] = [];
         let settled = false;
 
+        const cleanup = () => {
+            socket.off("data", onData);
+            socket.off("timeout", onTimeout);
+            socket.off("error", onError);
+            socket.off("end", onEnd);
+            socket.off("close", onClose);
+        };
+
         const finish = (handler: () => void) => {
             if (settled) return;
             settled = true;
+            cleanup();
             handler();
         };
 
-        socket.once("timeout", () => socket.destroy(new Error(`Request timed out after ${timeoutMs}ms`)));
-        socket.once("error", error => finish(() => reject(error)));
-        socket.on("data", chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-        socket.once("end", () => {
-            finish(() => {
-                try {
-                    resolve(parseRawHttpResponse(Buffer.concat(chunks)));
-                } catch (error) {
-                    reject(error);
-                }
-            });
-        });
-        socket.once("close", hadError => {
-            if (hadError) return;
-            if (!chunks.length) return;
+        const getBufferedResponse = () => {
+            if (!chunks.length) return null;
+            return tryParseCompleteHttpResponse(Buffer.concat(chunks));
+        };
+
+        const onData = (chunk: Buffer) => {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+
+            const completeResponse = getBufferedResponse();
+            if (!completeResponse) return;
 
             finish(() => {
+                socket.destroy();
+                resolve(completeResponse);
+            });
+        };
+
+        const onTimeout = () => socket.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+
+        const onError = (error: Error) => {
+            const completeResponse = getBufferedResponse();
+            if (completeResponse) {
+                finish(() => resolve(completeResponse));
+                return;
+            }
+
+            finish(() => reject(error));
+        };
+
+        const onEnd = () => {
+            finish(() => {
                 try {
                     resolve(parseRawHttpResponse(Buffer.concat(chunks)));
                 } catch (error) {
                     reject(error);
                 }
             });
-        });
+        };
+
+        const onClose = (hadError: boolean) => {
+            if (hadError) return;
+            if (!chunks.length) return;
+            onEnd();
+        };
+
+        socket.on("data", onData);
+        socket.once("timeout", onTimeout);
+        socket.once("error", onError);
+        socket.once("end", onEnd);
+        socket.once("close", onClose);
 
         socket.write(rawRequest);
     });
@@ -530,6 +566,57 @@ function formatHostHeader(url: URL) {
     return url.port && url.port !== defaultPort
         ? `${url.hostname}:${url.port}`
         : url.hostname;
+}
+
+function tryParseCompleteHttpResponse(response: Buffer): HttpResult | null {
+    const separatorIndex = response.indexOf("\r\n\r\n");
+    if (separatorIndex === -1) return null;
+
+    const headerText = response.subarray(0, separatorIndex).toString("utf8");
+    const body = response.subarray(separatorIndex + 4);
+    const [statusLine, ...headerLines] = headerText.split("\r\n");
+    const statusMatch = /^HTTP\/\d+(?:\.\d+)?\s+(\d+)/i.exec(statusLine);
+    if (!statusMatch) return null;
+
+    const headers = Object.fromEntries(headerLines.map(line => {
+        const separator = line.indexOf(":");
+        return [
+            line.slice(0, separator).trim().toLowerCase(),
+            line.slice(separator + 1).trim()
+        ];
+    }));
+
+    const transferEncoding = headers["transfer-encoding"]?.toLowerCase() || "";
+    if (transferEncoding.includes("chunked")) {
+        const decodedBody = tryDecodeChunkedBody(body);
+        if (!decodedBody) return null;
+
+        return {
+            data: decodedBody.toString("utf8"),
+            status: Number(statusMatch[1])
+        };
+    }
+
+    const contentLengthHeader = headers["content-length"];
+    if (contentLengthHeader) {
+        const contentLength = Number.parseInt(contentLengthHeader, 10);
+        if (!Number.isFinite(contentLength) || contentLength < 0) return null;
+        if (body.length < contentLength) return null;
+
+        return {
+            data: body.subarray(0, contentLength).toString("utf8"),
+            status: Number(statusMatch[1])
+        };
+    }
+
+    if (bodylessStatusCodes.has(Number(statusMatch[1]))) {
+        return {
+            data: "",
+            status: Number(statusMatch[1])
+        };
+    }
+
+    return null;
 }
 
 function parseRawHttpResponse(response: Buffer): HttpResult {
@@ -566,33 +653,41 @@ function parseRawHttpResponse(response: Buffer): HttpResult {
     };
 }
 
-function decodeChunkedBody(buffer: Buffer) {
+function tryDecodeChunkedBody(buffer: Buffer) {
     let offset = 0;
     const chunks: Buffer[] = [];
 
     while (offset < buffer.length) {
         const lineEnd = buffer.indexOf("\r\n", offset);
-        if (lineEnd === -1) throw new Error("Invalid chunked response from proxy");
+        if (lineEnd === -1) return null;
 
         const chunkSizeHex = buffer.subarray(offset, lineEnd).toString("utf8").split(";", 1)[0].trim();
         const chunkSize = Number.parseInt(chunkSizeHex, 16);
-        if (Number.isNaN(chunkSize)) {
-            throw new Error(`Invalid chunk size in proxy response: ${chunkSizeHex}`);
-        }
+        if (Number.isNaN(chunkSize)) return null;
 
         offset = lineEnd + 2;
         if (chunkSize === 0) {
+            if (buffer.length < offset + 2) return null;
             return Buffer.concat(chunks);
         }
 
         const chunkEnd = offset + chunkSize;
-        if (chunkEnd > buffer.length) throw new Error("Chunked response ended unexpectedly");
+        if (chunkEnd + 2 > buffer.length) return null;
 
         chunks.push(buffer.subarray(offset, chunkEnd));
         offset = chunkEnd + 2;
     }
 
-    throw new Error("Chunked response terminated unexpectedly");
+    return null;
+}
+
+function decodeChunkedBody(buffer: Buffer) {
+    const decodedBody = tryDecodeChunkedBody(buffer);
+    if (!decodedBody) {
+        throw new Error("Chunked response terminated unexpectedly");
+    }
+
+    return decodedBody;
 }
 
 async function openSocksConnection(url: URL, proxyUrl: string, timeoutMs: number): Promise<ConnectableSocket> {
